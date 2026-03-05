@@ -25,6 +25,14 @@ const DELIVERY_CONFIG = {
     }
 };
 
+// For tier-based calculations
+const ALLOWED_MISSING_HOURS = {
+    1: 50,
+    2: 20,
+    3: 10,
+    4: 3
+};
+
 // Helper Methods
 function parseToSeconds(str) {
     str = str.trim().toLowerCase();
@@ -157,7 +165,12 @@ function addShiftRecord(textFile, shiftObj) {
             driverName: parts[1],
             date: parts[2],
             startTime: parts[3],
-            endTime: parts[4]
+            endTime: parts[4],
+            shiftDuration: parts[5],
+            idleTime: parts[6],
+            activeTime: parts[7],
+            metQuota: Boolean(parts[8]),
+            hasBonus: Boolean(parts[9])
         };
     });
 
@@ -168,25 +181,10 @@ function addShiftRecord(textFile, shiftObj) {
 
     if (duplicate) return {};
 
-    const shiftDuration = getShiftDuration(
-        shiftObj.startTime,
-        shiftObj.endTime
-    );
-
-    const idleTime = getIdleTime(
-        shiftObj.startTime,
-        shiftObj.endTime
-    );
-
-    const activeTime = getActiveTime(
-        shiftDuration,
-        idleTime
-    );
-
-    const metQuotaFlag = metQuota(
-        shiftObj.date,
-        activeTime
-    );
+    const shiftDuration = getShiftDuration(shiftObj.startTime, shiftObj.endTime);
+    const idleTime = getIdleTime(shiftObj.startTime, shiftObj.endTime);
+    const activeTime = getActiveTime(shiftDuration, idleTime);
+    const metQuotaFlag = metQuota(shiftObj.date, activeTime);
 
     const newRecord = {
         driverID: shiftObj.driverID,
@@ -201,11 +199,17 @@ function addShiftRecord(textFile, shiftObj) {
         hasBonus: false
     };
 
-    records.push(newRecord);
+    // Find the index after the last record of the same driverID
+    let insertIndex = -1;
+    for (let i = 0; i < records.length; i++) {
+        if (records[i].driverID === shiftObj.driverID)
+            insertIndex = i;
+    }
 
-    records.sort((a, b) =>
-        new Date(a.date) - new Date(b.date)
-    );
+    if (insertIndex === -1)
+        records.push(newRecord);
+    else
+        records.splice(insertIndex + 1, 0, newRecord);
 
     const fileContent = records.map(r =>
         `${r.driverID},${r.driverName},${r.date},${r.startTime},${r.endTime},${r.shiftDuration},${r.idleTime},${r.activeTime},${r.metQuota},${r.hasBonus}`
@@ -277,7 +281,7 @@ function countBonusPerMonth(textFile, driverID, month) {
         const recordDate = parts[2];
         const hasBonus = parts[9] === "true";
 
-        if (recordDriverID !== driverID || !hasBonus) continue;
+        if (recordDriverID !== driverID) continue;
 
         driverExists = true;
 
@@ -298,7 +302,8 @@ function countBonusPerMonth(textFile, driverID, month) {
 // Returns: string formatted as hhh:mm:ss
 // ============================================================
 function getTotalActiveHoursPerMonth(textFile, driverID, month) {
-    if (!fs.existsSync(textFile)) formatToTime(0);
+    if (!fs.existsSync(textFile))
+        return formatToTime(0);
 
     const lines = readLines(textFile);
 
@@ -423,6 +428,39 @@ function getRequiredHoursPerMonth(textFile, rateFile, bonusCount, driverID, mont
 // Returns: integer (net pay)
 // ============================================================
 function getNetPay(driverID, actualHours, requiredHours, rateFile) {
+    if (!fs.existsSync(rateFile))
+        return 0;
+
+    const rateLines = readLines(rateFile);
+
+    let basePay = 0;
+    let tier = 0;
+
+    for (const line of rateLines) {
+        const parts = line.split(",");
+        if (parts[0] !== driverID) continue;
+
+        basePay = Number(parts[2]);
+        tier = Number(parts[3]);
+        break;
+    }
+
+    const actualSeconds = parseToSeconds(actualHours);
+    const requiredSeconds = parseToSeconds(requiredHours);
+
+    if (actualSeconds >= requiredSeconds) return basePay;
+
+    const missingSeconds = requiredSeconds - actualSeconds;
+    const missingHours = missingSeconds / 3600;
+
+    const allowed = ALLOWED_MISSING_HOURS[tier] || 0;
+
+    const billableMissingHours = Math.floor(Math.max(0, missingHours - allowed));
+
+    const deductionRatePerHour = Math.floor(basePay / 185);
+    const salaryDeduction = billableMissingHours * deductionRatePerHour;
+
+    return basePay - salaryDeduction;
 }
 
 module.exports = {
